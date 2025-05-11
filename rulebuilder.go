@@ -28,23 +28,39 @@ func insertRuleDict(node Dict, rule Dict, attrs []string, level int) {
 	}
 
 	attrKey := attrs[level]
-	attrValsRaw := rule["attributes"].(Dict)[attrKey]
-	var values []interface{}
-	if attrValsRaw == nil || len(attrValsRaw.([]interface{})) == 0 {
-		values = []interface{}{"*"}
-	} else {
-		values = attrValsRaw.([]interface{})
+	values := []interface{}{"*"}
+	negative := false
+
+	attrDataRaw, ok := rule["attributes"].(Dict)[attrKey]
+	if ok && attrDataRaw != nil {
+		attrData := attrDataRaw.(Dict)
+		values = attrData["values"].([]interface{})
+		negative = attrData["negative"].(bool)
 	}
 
-	for _, val := range values {
-		valStr := fmt.Sprintf("%v", val)
-		children := node["children"].(Dict)
+	children := node["children"].(Dict)
 
-		if _, exists := children[valStr]; !exists {
-			children[valStr] = newNode(valStr, attrKey)
+	if negative {
+		if _, exists := children["__not__"]; !exists {
+			children["__not__"] = []Dict{}
 		}
-		insertRuleDict(children[valStr].(Dict), rule, attrs, level+1)
+		notList := children["__not__"].([]Dict)
+		nextNode := newNode("*", attrKey)
+		children["__not__"] = append(notList, Dict{
+			"excluded_values": values,
+			"node":            nextNode,
+		})
+		insertRuleDict(nextNode, rule, attrs, level+1)
+	} else {
+		for _, val := range values {
+			valStr := fmt.Sprintf("%v", val)
+			if _, exists := children[valStr]; !exists {
+				children[valStr] = newNode(valStr, attrKey)
+			}
+			insertRuleDict(children[valStr].(Dict), rule, attrs, level+1)
+		}
 	}
+
 	if level == 0 {
 		delete(node, "attribute")
 	}
@@ -67,30 +83,28 @@ func appendIfMissing(slice []string, item string) []string {
 	return append(slice, item)
 }
 
-// Match function that checks an object against the tree
 func match(node Dict, object Dict, attrs []string, level int) []string {
 	if codes, exists := node["codes"]; exists && len(codes.([]string)) > 0 {
 		return codes.([]string)
 	}
+
 	var attrKey string
-	// Access any child from the map (assuming there is at least one child)
 	for _, child := range node["children"].(Dict) {
-		// Assume the first valid child is a Dict
-		firstChildNode, ok := child.(Dict)
-		if ok {
-			attrKey = firstChildNode["attribute"].(string)
+		if childNode, ok := child.(Dict); ok {
+			attrKey = childNode["attribute"].(string)
 			break
 		}
 	}
+
 	attrValsRaw := object["attributes"].(Dict)[attrKey]
 	var values []interface{}
-	if attrValsRaw == nil || len(attrValsRaw.([]interface{})) == 0 {
+	if attrValsRaw == nil {
 		values = []interface{}{"*"}
 	} else {
 		values = attrValsRaw.([]interface{})
 	}
 
-	var matchedCodes []string
+	matchedCodes := []string{}
 	children := node["children"].(Dict)
 
 	for _, val := range values {
@@ -100,33 +114,56 @@ func match(node Dict, object Dict, attrs []string, level int) []string {
 		}
 	}
 
-	// Check for wildcard path "*"
+	// Wildcard
 	if wildcardNode, exists := children["*"]; exists {
 		matchedCodes = append(matchedCodes, match(wildcardNode.(Dict), object, attrs, level+1)...)
+	}
+
+	// Negative checks
+	if notNodesRaw, exists := children["__not__"]; exists {
+		notNodes := notNodesRaw.([]Dict)
+		for _, notEntry := range notNodes {
+			excluded := notEntry["excluded_values"].([]interface{})
+			excludedSet := map[string]bool{}
+			for _, ex := range excluded {
+				excludedSet[fmt.Sprintf("%v", ex)] = true
+			}
+
+			exclude := false
+			for _, val := range values {
+				if excludedSet[fmt.Sprintf("%v", val)] {
+					exclude = true
+					break
+				}
+			}
+
+			if !exclude {
+				nextNode := notEntry["node"].(Dict)
+				matchedCodes = append(matchedCodes, match(nextNode, object, attrs, level+1)...)
+			}
+		}
 	}
 
 	return matchedCodes
 }
 
-// Function to loop over multiple objects and send them to the main match function, returning a map of matches
 func matchObjects(tree Dict, objects []Dict, attrs []string) map[string][]string {
 	result := make(map[string][]string)
-
 	for _, obj := range objects {
 		matches := match(tree, obj, attrs, 0)
-		objID := fmt.Sprintf("%v", obj["ID"]) // Assuming ID is a string in the object
+		objID := fmt.Sprintf("%v", obj["ID"])
 		result[objID] = matches
 	}
-
 	return result
 }
+
 func PrintTree(tree Dict) {
 	jsonBytes, err := json.MarshalIndent(tree, "", "  ")
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
-	fmt.Println(string(jsonBytes))
+	fmt.Println("tree", string(jsonBytes))
 }
 
 func main() {
@@ -134,19 +171,24 @@ func main() {
 		{
 			"code": "store_1",
 			"attributes": Dict{
-				"country": []interface{}{"US"},
-				"brand":   []interface{}{"Nike"},
+				"country": Dict{"values": []interface{}{"US"}, "negative": false},
+				"brand":   Dict{"values": []interface{}{"Nike"}, "negative": false},
 			},
 		},
 		{
 			"code": "store_2",
 			"attributes": Dict{
-				"country": []interface{}{"US"},
+				"country": Dict{"values": []interface{}{"US"}, "negative": false},
+			},
+		},
+		{
+			"code": "store_3",
+			"attributes": Dict{
+				"brand": Dict{"values": []interface{}{"Adidas", "Puma"}, "negative": true},
 			},
 		},
 	}
 
-	// Objects to match
 	objects := []Dict{
 		{
 			"ID": "offer_123",
@@ -159,23 +201,18 @@ func main() {
 			"ID": "offer_456",
 			"attributes": Dict{
 				"country": []interface{}{"UK"},
+				"brand":   []interface{}{"Reebok"},
 			},
 		},
 	}
 
 	attrs := []string{"country", "brand"}
-
-	// Build the tree from rules
 	tree := BuildTreeFromRules(rules, attrs)
-
-	// Match all objects and get the result as a map
 	matchedResults := matchObjects(tree, objects, attrs)
 
-	// Print the matched results
 	for objID, matches := range matchedResults {
 		fmt.Printf("Object %v matched with stores: %v\n", objID, matches)
 	}
 
-	// Print the tree as JSON
 	PrintTree(tree)
 }
