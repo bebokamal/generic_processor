@@ -45,7 +45,7 @@ func insertRuleDict(node Dict, rule Dict, attrs []string, level int) {
 			children["__not__"] = []Dict{}
 		}
 		notList := children["__not__"].([]Dict)
-		nextNode := newNode("*", attrKey)
+		nextNode := newNode("!", attrKey)
 		children["__not__"] = append(notList, Dict{
 			"excluded_values": values,
 			"node":            nextNode,
@@ -83,7 +83,7 @@ func appendIfMissing(slice []string, item string) []string {
 	return append(slice, item)
 }
 
-func match(node Dict, object Dict, attrs []string, level int) []string {
+func match(node Dict, object Dict, level int) []string {
 	if codes, exists := node["codes"]; exists && len(codes.([]string)) > 0 {
 		return codes.([]string)
 	}
@@ -110,13 +110,13 @@ func match(node Dict, object Dict, attrs []string, level int) []string {
 	for _, val := range values {
 		valStr := fmt.Sprintf("%v", val)
 		if childNode, exists := children[valStr]; exists {
-			matchedCodes = append(matchedCodes, match(childNode.(Dict), object, attrs, level+1)...)
+			matchedCodes = append(matchedCodes, match(childNode.(Dict), object, level+1)...)
 		}
 	}
 
 	// Wildcard
 	if wildcardNode, exists := children["*"]; exists {
-		matchedCodes = append(matchedCodes, match(wildcardNode.(Dict), object, attrs, level+1)...)
+		matchedCodes = append(matchedCodes, match(wildcardNode.(Dict), object, level+1)...)
 	}
 
 	// Negative checks
@@ -139,7 +139,7 @@ func match(node Dict, object Dict, attrs []string, level int) []string {
 
 			if !exclude {
 				nextNode := notEntry["node"].(Dict)
-				matchedCodes = append(matchedCodes, match(nextNode, object, attrs, level+1)...)
+				matchedCodes = append(matchedCodes, match(nextNode, object, level+1)...)
 			}
 		}
 	}
@@ -147,12 +147,20 @@ func match(node Dict, object Dict, attrs []string, level int) []string {
 	return matchedCodes
 }
 
-func matchObjects(tree Dict, objects []Dict, attrs []string) map[string][]string {
+func matchObjects(tree Dict, objects []Dict) map[string][]string {
 	result := make(map[string][]string)
 	for _, obj := range objects {
-		matches := match(tree, obj, attrs, 0)
+		rawMatches := match(tree, obj, 0)
+		seen := make(map[string]bool)
+		var uniqueMatches []string
+		for _, code := range rawMatches {
+			if !seen[code] {
+				seen[code] = true
+				uniqueMatches = append(uniqueMatches, code)
+			}
+		}
 		objID := fmt.Sprintf("%v", obj["ID"])
-		result[objID] = matches
+		result[objID] = uniqueMatches
 	}
 	return result
 }
@@ -208,7 +216,7 @@ func main() {
 
 	attrs := []string{"country", "brand"}
 	tree := BuildTreeFromRules(rules, attrs)
-	matchedResults := matchObjects(tree, objects, attrs)
+	matchedResults := matchObjects(tree, objects)
 
 	for objID, matches := range matchedResults {
 		fmt.Printf("Object %v matched with stores: %v\n", objID, matches)
